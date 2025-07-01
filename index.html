@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Git Conflict Resolver</title>
+  <style>
+    #editor { width: 100vw; height: 80vh; border: 1px solid #ccc; }
+    body { font-family: sans-serif; margin: 0; padding: 0; }
+    #controls { margin: 1em; }
+    .conflict-highlight {
+      background: #402020 !important;
+      border-left: 4px solid #ff5555;
+    }
+    .conflict-inline-highlight {
+      background: #402020 !important;
+    }
+    .conflict-line-decoration {
+      border-left: 4px solid #ff5555;
+    }
+  </style>
+  <!-- Monaco Editor loader -->
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+</head>
+<body>
+  <div style="display: flex; height: 100vh;">
+    <div id="sidebar" style="width: 220px; background: #222; color: #fff; padding: 0.5em 0; overflow-y: auto; min-width: 120px;"></div>
+    <div style="flex: 1; display: flex; flex-direction: column; min-width: 0;">
+      <div id="controls">
+        <button id="saveBtn">Save Resolved File</button>
+      </div>
+      <div id="editor" style="flex: 1; min-width: 0;"></div>
+    </div>
+  </div>
+  <script>
+    // Load conflict.json (map of filename -> content)
+    async function loadConflictJson() {
+      const response = await fetch('conflict.json');
+      if (!response.ok) throw new Error('Failed to load conflict.json');
+      return await response.json();
+    }
+
+    require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' } });
+    let editor;
+    let conflictJson = {};
+    let filenames = [];
+    let selectedFile = null;
+    let originalContent = '';
+
+    // Sidebar rendering
+    function renderSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      sidebar.innerHTML = '';
+      filenames.forEach(fname => {
+        const btn = document.createElement('div');
+        btn.textContent = fname;
+        btn.style.cursor = 'pointer';
+        btn.style.padding = '0.5em 1em';
+        btn.style.background = fname === selectedFile ? '#444' : 'none';
+        btn.style.color = fname === selectedFile ? '#fff' : '#ccc';
+        btn.style.fontWeight = fname === selectedFile ? 'bold' : 'normal';
+        btn.onmouseenter = () => btn.style.background = fname === selectedFile ? '#444' : '#333';
+        btn.onmouseleave = () => btn.style.background = fname === selectedFile ? '#444' : 'none';
+        btn.onclick = () => {
+          if (selectedFile !== fname) {
+            selectedFile = fname;
+            loadFileToEditor(fname);
+            renderSidebar();
+          }
+        };
+        sidebar.appendChild(btn);
+      });
+    }
+
+    // Load file content into editor
+    function loadFileToEditor(fname) {
+      if (!editor) return;
+      originalContent = conflictJson[fname] || '';
+      editor.setValue(originalContent);
+      currentConflictIndex = 0;
+      showConflictActions();
+    }
+
+    // Initial load
+    loadConflictJson().then(json => {
+      conflictJson = json;
+      filenames = Object.keys(json);
+      selectedFile = filenames[0];
+      require(['vs/editor/editor.main'], function () {
+        editor = monaco.editor.create(document.getElementById('editor'), {
+          value: conflictJson[selectedFile] || '',
+          language: 'plaintext',
+          theme: 'vs-dark',
+          automaticLayout: true
+        });
+        renderSidebar();
+        showConflictActions();
+        editor.onDidChangeModelContent(() => {
+          showConflictActions();
+        });
+      });
+    }).catch(err => {
+      document.getElementById('editor').innerText = 'Error loading conflict.json: ' + err.message;
+    });
+
+    // --- Conflict Resolution UI ---
+    // Add UI for conflict resolution
+    const controlsDiv = document.getElementById('controls');
+    const conflictActions = document.createElement('div');
+    conflictActions.style.marginTop = '1em';
+    controlsDiv.appendChild(conflictActions);
+
+    // Helper to find next conflict region
+    function findNextConflict(content, startIdx = 0) {
+      const start = content.indexOf('<<<<<<<', startIdx);
+      if (start === -1) return null;
+      const mid = content.indexOf('=======', start);
+      const end = content.indexOf('>>>>>>>', mid);
+      if (mid === -1 || end === -1) return null;
+      return { start, mid, end: end + 7 }; // include '>>>>>>>'
+    }
+
+    // Helper to find all conflict regions
+    function findAllConflicts(content) {
+      let conflicts = [];
+      let idx = 0;
+      while (true) {
+        const start = content.indexOf('<<<<<<<', idx);
+        if (start === -1) break;
+        const mid = content.indexOf('=======', start);
+        const end = content.indexOf('>>>>>>>', mid);
+        if (mid === -1 || end === -1) break;
+        conflicts.push({ start, mid, end: end + 7 });
+        idx = end + 7;
+      }
+      return conflicts;
+    }
+
+    // Highlight conflict region in Monaco
+    let conflictDecorationIds = [];
+    function highlightConflict(conflict) {
+      if (!editor || !conflict) return;
+      const model = editor.getModel();
+      // Remove previous highlights
+      conflictDecorationIds = editor.deltaDecorations(conflictDecorationIds, []);
+      // Calculate line/column positions
+      const startPos = model.getPositionAt(conflict.start);
+      const midPos = model.getPositionAt(conflict.mid);
+      const endPos = model.getPositionAt(conflict.end);
+      // Find the lines for each section
+      const startLine = startPos.lineNumber;
+      const midLine = midPos.lineNumber;
+      const endLine = endPos.lineNumber;
+      // Decorations for each section
+      const decorations = [
+        // Current change (green)
+        {
+          range: new monaco.Range(startLine, 1, midLine - 1, model.getLineMaxColumn(midLine - 1)),
+          options: {
+            isWholeLine: true,
+            className: 'conflict-current',
+          }
+        },
+        // Incoming change (blue)
+        {
+          range: new monaco.Range(midLine + 1, 1, endLine, model.getLineMaxColumn(endLine)),
+          options: {
+            isWholeLine: true,
+            className: 'conflict-incoming',
+          }
+        }
+      ];
+      conflictDecorationIds = editor.deltaDecorations([], decorations);
+    }
+
+    // Add CSS for highlight
+    const style = document.createElement('style');
+    style.innerHTML = `
+      .conflict-current {
+        background: #1e4020 !important;
+      }
+      .conflict-incoming {
+        background: #203040 !important;
+      }
+    `;
+    document.head.appendChild(style);
+
+    let currentConflictIndex = 0;
+    let allConflicts = [];
+
+    // Highlight and show buttons for the selected conflict
+    function showConflictActions() {
+      if (!editor) return;
+      const content = editor.getValue();
+      allConflicts = findAllConflicts(content);
+      // Clamp currentConflictIndex
+      if (currentConflictIndex >= allConflicts.length) currentConflictIndex = allConflicts.length - 1;
+      if (currentConflictIndex < 0) currentConflictIndex = 0;
+      conflictActions.innerHTML = '';
+      if (allConflicts.length === 0) {
+        highlightConflict(null);
+        return; // No conflict found
+      }
+      const conflict = allConflicts[currentConflictIndex];
+      highlightConflict(conflict);
+      // Navigation buttons
+      const prevBtn = document.createElement('button');
+      prevBtn.textContent = 'Previous Conflict';
+      prevBtn.disabled = currentConflictIndex === 0;
+      prevBtn.onclick = function () {
+        currentConflictIndex--;
+        showConflictActions();
+      };
+      const nextBtn = document.createElement('button');
+      nextBtn.textContent = 'Next Conflict';
+      nextBtn.disabled = currentConflictIndex === allConflicts.length - 1;
+      nextBtn.onclick = function () {
+        currentConflictIndex++;
+        showConflictActions();
+      };
+      conflictActions.appendChild(prevBtn);
+      conflictActions.appendChild(nextBtn);
+      // Show accept buttons
+      const acceptCurrent = document.createElement('button');
+      acceptCurrent.textContent = 'Accept Current Change';
+      const acceptIncoming = document.createElement('button');
+      acceptIncoming.textContent = 'Accept Incoming Change';
+      conflictActions.appendChild(acceptCurrent);
+      conflictActions.appendChild(acceptIncoming);
+      // Scroll to conflict
+      const model = editor.getModel();
+      const startLine = model.getPositionAt(conflict.start).lineNumber;
+      editor.revealLineInCenter(startLine);
+      // Button handlers
+      acceptCurrent.onclick = function () {
+        const newContent = content.substring(0, conflict.start) +
+          content.substring(conflict.start + 7, conflict.mid).replace(/^\n/, '') +
+          content.substring(conflict.end + 1);
+        editor.setValue(newContent);
+        // After resolving, stay on the same index (as conflicts shift up)
+        setTimeout(() => {
+          allConflicts = findAllConflicts(editor.getValue());
+          if (currentConflictIndex >= allConflicts.length) currentConflictIndex = allConflicts.length - 1;
+          showConflictActions();
+        }, 100);
+      };
+      acceptIncoming.onclick = function () {
+        const newContent = content.substring(0, conflict.start) +
+          content.substring(conflict.mid + 7, conflict.end - 7).replace(/^\n/, '') +
+          content.substring(conflict.end + 1);
+        editor.setValue(newContent);
+        setTimeout(() => {
+          allConflicts = findAllConflicts(editor.getValue());
+          if (currentConflictIndex >= allConflicts.length) currentConflictIndex = allConflicts.length - 1;
+          showConflictActions();
+        }, 100);
+      };
+      // Show conflict count
+      const info = document.createElement('span');
+      info.style.marginLeft = '1em';
+      info.textContent = `Conflict ${allConflicts.length ? currentConflictIndex + 1 : 0} of ${allConflicts.length}`;
+      conflictActions.appendChild(info);
+    }
+
+    // Re-run conflict detection after editor loads and on content change
+    function setupConflictDetection() {
+      if (!editor) return;
+      showConflictActions();
+      editor.onDidChangeModelContent(() => {
+        showConflictActions();
+      });
+    }
+
+    // Wait for Monaco to load, then setup conflict detection
+    const monacoInterval = setInterval(() => {
+      if (editor) {
+        setupConflictDetection();
+        clearInterval(monacoInterval);
+      }
+    }, 200);
+
+    // Save button handler
+    document.getElementById('saveBtn').onclick = function () {
+      if (!editor || !selectedFile) return;
+      const resolvedContent = editor.getValue();
+      const newJson = { ...conflictJson, [selectedFile]: resolvedContent };
+      const blob = new Blob([JSON.stringify(newJson, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'conflict.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+  </script>
+</body>
+</html>

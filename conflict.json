@@ -1,0 +1,4 @@
+{
+  "file1.txt": "<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n",
+  "file2.txt": "<<<<<<< HEAD\nX\n=======\nY\n>>>>>>> branch\n"
+}
